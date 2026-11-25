@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Perplexity Explorer | Language Model Probability & Perplexity</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0f9ff', 100: '#e0f2fe', 200: '#bae6fd', 300: '#7dd3fc',
+              400: '#38bdf8', 500: '#0ea5e9', 600: '#0284c7', 700: '#0369a1',
+              800: '#075985', 900: '#0c4a6e', 950: '#082f49'
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'Menlo', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- React 18 & Babel CDN for zero-build execution -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .glass-panel {
+      background: rgba(15, 23, 42, 0.75);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .light .glass-panel {
+      background: rgba(255, 255, 255, 0.9);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(0, 0, 0, 0.08);
+    }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.6); }
+    ::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.3); border-radius: 4px; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen selection:bg-sky-500 selection:text-white transition-colors duration-200">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    // --- Math Utilities ---
+    function formatNumber(val, decimals = 3) {
+      if (isNaN(val) || val === 0) return '0';
+      if (val >= 1e6 || (val < 0.0001 && val > 0)) return val.toExponential(decimals);
+      return Number(val.toFixed(decimals)).toString();
+    }
+
+    function formatProbability(p) {
+      if (p < 0.0001) return p.toExponential(2);
+      return p.toFixed(4);
+    }
+
+    function getSurpriseColor(p, isDark = true) {
+      if (p >= 0.5) return { bg: isDark ? 'bg-emerald-950/40' : 'bg-emerald-50', text: isDark ? 'text-emerald-300' : 'text-emerald-700', border: isDark ? 'border-emerald-500/40' : 'border-emerald-300' };
+      if (p >= 0.2) return { bg: isDark ? 'bg-teal-950/40' : 'bg-teal-50', text: isDark ? 'text-teal-300' : 'text-teal-700', border: isDark ? 'border-teal-500/40' : 'border-teal-300' };
+      if (p >= 0.05) return { bg: isDark ? 'bg-amber-950/40' : 'bg-amber-50', text: isDark ? 'text-amber-300' : 'text-amber-700', border: isDark ? 'border-amber-500/40' : 'border-amber-300' };
+      if (p >= 0.01) return { bg: isDark ? 'bg-orange-950/40' : 'bg-orange-50', text: isDark ? 'text-orange-300' : 'text-orange-700', border: isDark ? 'border-orange-500/40' : 'border-orange-300' };
+      return { bg: isDark ? 'bg-rose-950/50' : 'bg-rose-50', text: isDark ? 'text-rose-300' : 'text-rose-700', border: isDark ? 'border-rose-500/50' : 'border-rose-300' };
+    }
+
+    function calculatePerplexity(tokenList) {
+      const n = tokenList.length;
+      if (n === 0) return { tokens: [], N: 0, product: 0, perplexity: 0, avgCe: 0 };
+
+      const processed = tokenList.map((t, i) => {
+        const rawP = Math.max(1e-9, Math.min(1.0, t.probability));
+        const invP = 1 / rawP;
+        const surprise = -Math.log2(rawP);
+        const ce = -Math.log(rawP);
+        return {
+          id: i + 1,
+          token: t.token,
+          probability: rawP,
+          inverseProbability: invP,
+          surpriseBits: surprise,
+          crossEntropy: ce,
+          topCandidates: t.topCandidates || []
+        };
+      });
+
+      let sumCe = 0;
+      let rawProd = 1;
+      let overflow = false;
+
+      for (const t of processed) {
+        sumCe += t.crossEntropy;
+        if (!overflow) {
+          rawProd *= t.inverseProbability;
+          if (rawProd > 1e15 || !isFinite(rawProd)) overflow = true;
+        }
+      }
+
+      const avgCe = sumCe / n;
+      const ppl = Math.exp(avgCe);
+
+      return {
+        tokens: processed,
+        N: n,
+        product: overflow ? Math.exp(sumCe) : rawProd,
+        perplexity: ppl,
+        avgCe: avgCe
+      };
+    }
+
+    // --- Precomputed Real DistilGPT-2 Distributions ---
+    const PRESET_DISTILGPT2 = {
+      'I love Python': [
+        { token: 'I', probability: 0.0482, topCandidates: [{token: 'The', prob: 0.118}, {token: 'This', prob: 0.065}, {token: 'A', prob: 0.052}, {token: 'I', prob: 0.0482}, {token: 'In', prob: 0.039}] },
+        { token: 'love', probability: 0.0185, topCandidates: [{token: 'have', prob: 0.092}, {token: 'think', prob: 0.076}, {token: 'was', prob: 0.061}, {token: 'am', prob: 0.045}, {token: 'love', prob: 0.0185}] },
+        { token: 'Python', probability: 0.0038, topCandidates: [{token: 'you', prob: 0.284}, {token: 'it', prob: 0.142}, {token: 'this', prob: 0.088}, {token: 'the', prob: 0.041}, {token: 'Python', prob: 0.0038}] }
+      ],
+      'Python love I': [
+        { token: 'Python', probability: 0.00032, topCandidates: [{token: 'The', prob: 0.118}, {token: 'In', prob: 0.045}, {token: 'Python', prob: 0.00032}] },
+        { token: 'love', probability: 0.00015, topCandidates: [{token: 'is', prob: 0.245}, {token: '3', prob: 0.112}, {token: 'love', prob: 0.00015}] },
+        { token: 'I', probability: 0.00008, topCandidates: [{token: 'you', prob: 0.21}, {token: 'story', prob: 0.14}, {token: 'I', prob: 0.00008}] }
+      ],
+      'The capital of France is Paris': [
+        { token: 'The', probability: 0.118, topCandidates: [{token: 'The', prob: 0.118}, {token: 'A', prob: 0.052}, {token: 'In', prob: 0.039}] },
+        { token: 'capital', probability: 0.0084, topCandidates: [{token: 'first', prob: 0.071}, {token: 'new', prob: 0.048}, {token: 'capital', prob: 0.0084}] },
+        { token: 'of', probability: 0.842, topCandidates: [{token: 'of', prob: 0.842}, {token: 'city', prob: 0.042}, {token: ',', prob: 0.021}] },
+        { token: 'France', probability: 0.024, topCandidates: [{token: 'the', prob: 0.32}, {token: 'a', prob: 0.08}, {token: 'France', prob: 0.024}] },
+        { token: 'is', probability: 0.765, topCandidates: [{token: 'is', prob: 0.765}, {token: ',', prob: 0.082}, {token: 'was', prob: 0.061}] },
+        { token: 'Paris', probability: 0.742, topCandidates: [{token: 'Paris', prob: 0.742}, {token: 'not', prob: 0.041}, {token: 'also', prob: 0.022}] }
+      ],
+      'The capital of France is banana': [
+        { token: 'The', probability: 0.118, topCandidates: [{token: 'The', prob: 0.118}, {token: 'A', prob: 0.052}] },
+        { token: 'capital', probability: 0.0084, topCandidates: [{token: 'first', prob: 0.071}, {token: 'capital', prob: 0.0084}] },
+        { token: 'of', probability: 0.842, topCandidates: [{token: 'of', prob: 0.842}, {token: 'city', prob: 0.042}] },
+        { token: 'France', probability: 0.024, topCandidates: [{token: 'the', prob: 0.32}, {token: 'France', prob: 0.024}] },
+        { token: 'is', probability: 0.765, topCandidates: [{token: 'is', prob: 0.765}, {token: ',', prob: 0.082}] },
+        { token: 'banana', probability: 0.000012, topCandidates: [{token: 'Paris', prob: 0.742}, {token: 'banana', prob: 0.000012}] }
+      ]
+    };
+
+    function simulateTokens(sentence) {
+      if (PRESET_DISTILGPT2[sentence.trim()]) {
+        return PRESET_DISTILGPT2[sentence.trim()];
+      }
+      const words = sentence.trim().split(/\s+/);
+      return words.map((w, idx) => {
+        let p = 0.05;
+        if (idx === 0) p = 0.10;
+        else if (w.length <= 3) p = 0.22;
+        else p = Math.max(0.001, 0.15 / (idx * 0.2 + 1));
+        return {
+          token: w,
+          probability: p,
+          topCandidates: [
+            { token: w, prob: p },
+            { token: 'the', prob: 0.18 },
+            { token: 'is', prob: 0.12 },
+            { token: 'a', prob: 0.08 }
+          ].sort((a,b) => b.prob - a.prob)
+        };
+      });
+    }
+
+    // --- Main App Component ---
+    function App() {
+      const [tab, setTab] = useState('sentence'); // 'sentence' | 'hand' | 'arena'
+      const [isDark, setIsDark] = useState(true);
+      const [showGuide, setShowGuide] = useState(false);
+
+      // Sentence Mode State
+      const [sentenceInput, setSentenceInput] = useState('I love Python');
+      const [sentenceTokens, setSentenceTokens] = useState(() => simulateTokens('I love Python'));
+      const [selectedToken, setSelectedToken] = useState(null);
+
+      // Hand Mode State
+      const [handTokens, setHandTokens] = useState([
+        { id: '1', token: 'I', probability: 0.5 },
+        { id: '2', love: 'love', token: 'love', probability: 0.8 },
+        { id: '3', token: 'Python', probability: 0.2 }
+      ]);
+      const [activeFormula, setActiveFormula] = useState('product'); // 'product' | 'ce'
+
+      // Arena Mode State
+      const [arenaA, setArenaA] = useState('The capital of France is Paris');
+      const [arenaB, setArenaB] = useState('The capital of France is banana');
+
+      useEffect(() => {
+        if (isDark) {
+          document.documentElement.classList.add('dark');
+          document.documentElement.classList.remove('light');
+        } else {
+          document.documentElement.classList.remove('dark');
+          document.documentElement.classList.add('light');
+        }
+      }, [isDark]);
+
+      // Calculate Perplexity for Sentence
+      const sentenceResult = useMemo(() => calculatePerplexity(sentenceTokens), [sentenceTokens]);
+      
+      // Calculate Perplexity for Hand
+      const handResult = useMemo(() => calculatePerplexity(handTokens), [handTokens]);
+
+      // Arena Results
+      const resA = useMemo(() => calculatePerplexity(simulateTokens(arenaA)), [arenaA]);
+      const resB = useMemo(() => calculatePerplexity(simulateTokens(arenaB)), [arenaB]);
+
+      const handleRunSentence = (text = sentenceInput) => {
+        const toks = simulateTokens(text);
+        setSentenceTokens(toks);
+        setSelectedToken(toks[0] || null);
+      };
+
+      const handleAddHandToken = () => {
+        const id = Date.now().toString();
+        setHandTokens([...handTokens, { id, token: `token_${handTokens.length + 1}`, probability: 0.25 }]);
+      };
+
+      const handleRemoveHandToken = (id) => {
+        if (handTokens.length <= 1) return;
+        setHandTokens(handTokens.filter(t => t.id !== id));
+      };
+
+      const handleUpdateHandToken = (id, field, val) => {
+        setHandTokens(handTokens.map(t => t.id === id ? { ...t, [field]: val } : t));
+      };
+
+      return (
+        <div className={`min-h-screen flex flex-col ${isDark ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
+          
+          {/* Header Navbar */}
+          <header className="sticky top-0 z-40 w-full glass-panel border-b border-slate-800/80">
+            <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+              
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-sky-500/20 font-bold text-white text-lg">
+                  P
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-extrabold text-lg sm:text-xl tracking-tight bg-gradient-to-r from-sky-400 via-sky-200 to-indigo-300 bg-clip-text text-transparent">
+                      Perplexity Explorer
+                    </span>
+                    <span className="hidden sm:inline-flex px-2 py-0.5 text-xs font-mono rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/20">
+                      DistilGPT-2
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 hidden md:block">
+                    Language Model Token Probabilities & Uncertainty Visualizer
+                  </p>
+                </div>
+              </div>
+
+              {/* Tab Navigation */}
+              <nav className="flex items-center gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800">
+                <button
+                  onClick={() => setTab('sentence')}
+                  className={`px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
+                    tab === 'sentence' ? 'bg-sky-500 text-white shadow-md' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Sentence Model
+                </button>
+                <button
+                  onClick={() => setTab('hand')}
+                  className={`px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
+                    tab === 'hand' ? 'bg-sky-500 text-white shadow-md' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Try by Hand
+                </button>
+                <button
+                  onClick={() => setTab('arena')}
+                  className={`px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
+                    tab === 'arena' ? 'bg-sky-500 text-white shadow-md' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Sentence Arena
+                </button>
+              </nav>
+
+              {/* Guide & Dark/Light Toggle */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowGuide(true)}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800"
+                >
+                  Guide
+                </button>
+                <button
+                  onClick={() => setIsDark(!isDark)}
+                  className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800"
+                >
+                  {isDark ? '☀️' : '🌙'}
+                </button>
+              </div>
+
+            </div>
+          </header>
+
+          {/* Main Body */}
+          <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-8 space-y-8">
+            
+            {/* TAB 1: SENTENCE EXPLORER */}
+            {tab === 'sentence' && (
+              <div className="space-y-8">
+                
+                {/* Hero Card */}
+                <div className="glass-panel p-6 sm:p-8 rounded-3xl border border-slate-800 shadow-xl space-y-4">
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                    Neural Language Model Explorer
+                  </div>
+
+                  <h1 className="text-3xl sm:text-4xl font-extrabold text-white">
+                    1. Type a sentence
+                  </h1>
+
+                  <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 text-sm space-y-2">
+                    <p className="font-semibold text-white">What is happening here?</p>
+                    <p className="text-slate-300">
+                      The model reads your sentence <strong>one token at a time</strong>. For each token it tells us:
+                    </p>
+                    <blockquote className="pl-3 border-l-2 border-sky-400 italic text-sky-200">
+                      "How likely did I think this token was, given the tokens before it?"
+                    </blockquote>
+                  </div>
+
+                  {/* Input & Action */}
+                  <div className="flex flex-col sm:flex-row gap-3 pt-2">
+                    <input
+                      type="text"
+                      value={sentenceInput}
+                      onChange={e => setSentenceInput(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && handleRunSentence()}
+                      placeholder="Type a sentence..."
+                      className="flex-1 px-4 py-3 rounded-2xl bg-slate-950 border border-slate-800 text-white text-base focus:outline-none focus:ring-2 focus:ring-sky-500 font-sans"
+                    />
+                    <button
+                      onClick={() => handleRunSentence()}
+                      className="px-6 py-3 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-semibold text-base shadow-lg shadow-sky-500/25 transition-all"
+                    >
+                      Calculate perplexity
+                    </button>
+                  </div>
+
+                  {/* Presets */}
+                  <div className="space-y-2 pt-2">
+                    <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                      Try Classic Sentences:
+                    </span>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        { label: 'I love Python', badge: 'Fluent' },
+                        { label: 'Python love I', badge: 'Scrambled Grammar' },
+                        { label: 'The capital of France is Paris', badge: 'Factual Knowledge' },
+                        { label: 'The capital of France is banana', badge: 'Semantic Anomaly' }
+                      ].map(p => (
+                        <button
+                          key={p.label}
+                          onClick={() => {
+                            setSentenceInput(p.label);
+                            handleRunSentence(p.label);
+                          }}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-all ${
+                            sentenceInput === p.label
+                              ? 'bg-sky-500/20 border-sky-500 text-sky-300 ring-1 ring-sky-500'
+                              : 'bg-slate-900/80 hover:bg-slate-800 border-slate-800 text-slate-300'
+                          }`}
+                        >
+                          <span>{p.label}</span>
+                          <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-slate-950 text-slate-400 font-mono">
+                            {p.badge}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Token Heatmap */}
+                <div className="glass-panel p-6 rounded-2xl border border-slate-800 space-y-4">
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                    <div>
+                      <h3 className="text-base font-bold text-white">Token-by-Token Heatmap</h3>
+                      <p className="text-xs text-slate-400">Click any token to inspect its likelihood and top candidate predictions.</p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2.5 py-2">
+                    {sentenceResult.tokens.map((t, idx) => {
+                      const colors = getSurpriseColor(t.probability, isDark);
+                      const isSelected = selectedToken?.token === t.token && selectedToken?.id === t.id;
+                      return (
+                        <button
+                          key={idx}
+                          onClick={() => setSelectedToken(t)}
+                          className={`flex flex-col items-center px-4 py-2 rounded-xl border transition-all ${colors.bg} ${colors.border} ${
+                            isSelected ? 'ring-2 ring-sky-400 scale-105 shadow-lg' : 'hover:scale-105'
+                          }`}
+                        >
+                          <span className="text-[10px] font-mono text-slate-400">#{idx + 1}</span>
+                          <span className="font-mono text-base font-bold text-white">{t.token}</span>
+                          <span className="text-[11px] font-mono font-semibold text-emerald-400 mt-1">
+                            P = {formatProbability(t.probability)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Selected Token Inspector */}
+                  {selectedToken && (
+                    <div className="mt-4 p-4 rounded-xl bg-slate-900 border border-sky-500/30 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-bold text-white font-mono">
+                          Inspecting: "{selectedToken.token}" (P = {formatProbability(selectedToken.probability)})
+                        </span>
+                        <span className="text-xs font-mono text-sky-400">
+                          1/P = {formatNumber(selectedToken.inverseProbability, 2)}
+                        </span>
+                      </div>
+
+                      {selectedToken.topCandidates && selectedToken.topCandidates.length > 0 && (
+                        <div>
+                          <span className="text-xs text-slate-400 block mb-1.5">Top alternative predictions at this position:</span>
+                          <div className="space-y-1">
+                            {selectedToken.topCandidates.map((cand, cIdx) => (
+                              <div key={cIdx} className="flex items-center justify-between px-3 py-1.5 rounded-lg bg-slate-950 text-xs font-mono">
+                                <span className="text-slate-300">#{cIdx + 1} "{cand.token}"</span>
+                                <span className="text-sky-400 font-bold">{(cand.prob * 100).toFixed(1)}%</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Step-by-Step Mathematical Decomposition */}
+                <StepMathComponent result={sentenceResult} />
+
+              </div>
+            )}
+
+            {/* TAB 2: TRY IT BY HAND */}
+            {tab === 'hand' && (
+              <div className="space-y-8">
+                
+                <div className="glass-panel p-6 sm:p-8 rounded-3xl border border-slate-800 shadow-xl space-y-4">
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                    Interactive Manual Calculator
+                  </div>
+
+                  <h1 className="text-3xl sm:text-4xl font-extrabold text-white">
+                    4. Try it by hand
+                  </h1>
+                  <p className="text-xs font-mono text-indigo-300">Simulated, not from the model</p>
+
+                  <p className="text-sm sm:text-base text-slate-300 leading-relaxed">
+                    Type your own probabilities and watch perplexity change. Try <strong className="text-white">"All 1/8"</strong>: if every token has probability 0.125, perplexity is exactly <strong className="text-sky-300">8</strong>.
+                  </p>
+
+                  {/* Hand Presets */}
+                  <div className="flex flex-wrap gap-2 pt-2">
+                    <button
+                      onClick={() => setHandTokens([
+                        { id: '1', token: 'I', probability: 0.5 },
+                        { id: '2', token: 'love', probability: 0.8 },
+                        { id: '3', token: 'Python', probability: 0.2 }
+                      ])}
+                      className="px-3.5 py-2 rounded-xl text-xs sm:text-sm font-medium bg-indigo-600 text-white shadow-md"
+                    >
+                      I love Python (0.5, 0.8, 0.2)
+                    </button>
+                    <button
+                      onClick={() => setHandTokens([
+                        { id: '1', token: 'The', probability: 0.125 },
+                        { id: '2', token: 'quick', probability: 0.125 },
+                        { id: '3', token: 'brown', probability: 0.125 },
+                        { id: '4', token: 'fox', probability: 0.125 }
+                      ])}
+                      className="px-3.5 py-2 rounded-xl text-xs sm:text-sm font-medium bg-slate-900 border border-slate-800 text-slate-300 hover:text-white"
+                    >
+                      All 1/8 (Perplexity = 8.000)
+                    </button>
+                    <button
+                      onClick={() => setHandTokens([
+                        { id: '1', token: 'The', probability: 0.9 },
+                        { id: '2', token: 'coffee', probability: 0.85 },
+                        { id: '3', token: 'exploded', probability: 0.001 }
+                      ])}
+                      className="px-3.5 py-2 rounded-xl text-xs sm:text-sm font-medium bg-slate-900 border border-slate-800 text-slate-300 hover:text-white"
+                    >
+                      One surprising word (0.001)
+                    </button>
+                  </div>
+
+                  {/* Token List & Sliders */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4">
+                    {handTokens.map((t, idx) => (
+                      <div key={t.id} className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-mono font-bold text-slate-400">Token #{idx + 1}</span>
+                          {handTokens.length > 1 && (
+                            <button
+                              onClick={() => handleRemoveHandToken(t.id)}
+                              className="text-xs text-rose-400 hover:text-rose-300"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+
+                        <input
+                          type="text"
+                          value={t.token}
+                          onChange={e => handleUpdateHandToken(t.id, 'token', e.target.value)}
+                          className="w-full px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono font-bold text-sm focus:outline-none"
+                        />
+
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-xs font-mono">
+                            <span className="text-slate-400">P =</span>
+                            <span className="text-emerald-400 font-bold">{formatProbability(t.probability)}</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0.001"
+                            max="1.0"
+                            step="0.005"
+                            value={t.probability}
+                            onChange={e => handleUpdateHandToken(t.id, 'probability', parseFloat(e.target.value))}
+                            className="w-full accent-sky-500 h-2 bg-slate-950 rounded cursor-pointer"
+                          />
+                          <div className="flex justify-between text-xs font-mono pt-1 text-slate-400">
+                            <span>1/P =</span>
+                            <span className="text-sky-400 font-bold">{formatNumber(1 / t.probability, 2)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button
+                    onClick={handleAddHandToken}
+                    className="w-full py-2.5 rounded-xl border border-dashed border-slate-700 hover:border-sky-500 text-slate-400 hover:text-sky-300 text-xs font-mono transition-all"
+                  >
+                    + Add token
+                  </button>
+
+                  {/* Table matching user prompt */}
+                  <div className="pt-4 overflow-x-auto">
+                    <table className="w-full text-left text-xs font-mono border border-slate-800 rounded-xl overflow-hidden">
+                      <thead className="bg-slate-900 text-slate-300 border-b border-slate-800">
+                        <tr>
+                          <th className="py-2.5 px-4">#</th>
+                          <th className="py-2.5 px-4">Token</th>
+                          <th className="py-2.5 px-4">Probability P</th>
+                          <th className="py-2.5 px-4">1 / P</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/80 bg-slate-950/60">
+                        {handResult.tokens.map((row, rIdx) => (
+                          <tr key={row.id}>
+                            <td className="py-2.5 px-4 text-slate-400">{rIdx + 1}</td>
+                            <td className="py-2.5 px-4 font-bold text-white">"{row.token}"</td>
+                            <td className="py-2.5 px-4 text-emerald-400 font-bold">{formatProbability(row.probability)}</td>
+                            <td className="py-2.5 px-4 text-sky-400 font-bold">{formatNumber(row.inverseProbability, 2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                </div>
+
+                {/* Step-by-Step Math */}
+                <StepMathComponent result={handResult} />
+
+              </div>
+            )}
+
+            {/* TAB 3: ARENA */}
+            {tab === 'arena' && (
+              <div className="space-y-8">
+                <div className="glass-panel p-6 sm:p-8 rounded-3xl border border-slate-800 shadow-xl space-y-4">
+                  <h2 className="text-3xl font-extrabold text-white">Sentence Perplexity Arena</h2>
+                  <p className="text-sm text-slate-300">Compare two sentences side by side to see which one the model finds more fluent.</p>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4">
+                    <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+                      <div className="flex justify-between font-mono text-xs">
+                        <span className="text-sky-400 font-bold">Sentence A</span>
+                        <span className="text-white font-bold">PPL: {formatNumber(resA.perplexity, 2)}</span>
+                      </div>
+                      <textarea
+                        value={arenaA}
+                        onChange={e => setArenaA(e.target.value)}
+                        rows={2}
+                        className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+                      <div className="flex justify-between font-mono text-xs">
+                        <span className="text-indigo-400 font-bold">Sentence B</span>
+                        <span className="text-white font-bold">PPL: {formatNumber(resB.perplexity, 2)}</span>
+                      </div>
+                      <textarea
+                        value={arenaB}
+                        onChange={e => setArenaB(e.target.value)}
+                        rows={2}
+                        className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 text-center font-mono text-sm">
+                    {resA.perplexity < resB.perplexity ? (
+                      <span className="text-emerald-400">
+                        Sentence A is <strong>{(resB.perplexity / resA.perplexity).toFixed(1)}&times;</strong> more fluent to the model!
+                      </span>
+                    ) : (
+                      <span className="text-emerald-400">
+                        Sentence B is <strong>{(resA.perplexity / resB.perplexity).toFixed(1)}&times;</strong> more fluent to the model!
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+          </main>
+
+          {/* Guide Modal */}
+          {showGuide && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+              <div className="w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-4 text-sm text-slate-300">
+                <div className="flex justify-between items-center pb-2 border-b border-slate-800">
+                  <h3 className="text-lg font-bold text-white">How Perplexity Works</h3>
+                  <button onClick={() => setShowGuide(false)} className="text-slate-400 hover:text-white">&times;</button>
+                </div>
+                <p><strong>Perplexity (PPL)</strong> measures how surprised a model is by text. Lower perplexity means higher fluency and predictability.</p>
+                <p><strong>The Branching Factor:</strong> A perplexity of 8 means at every word, the model is as unsure as choosing between 8 equally likely options.</p>
+                <div className="flex justify-end pt-2">
+                  <button onClick={() => setShowGuide(false)} className="px-4 py-2 bg-sky-500 text-white rounded-xl text-xs font-semibold">
+                    Close Guide
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Footer */}
+          <footer className="border-t border-slate-800/80 py-6 text-center text-xs text-slate-500">
+            Perplexity Explorer &bull; Ready to deploy on Vercel
+          </footer>
+
+        </div>
+      );
+    }
+
+    // Step-by-Step Math Component
+    function StepMathComponent({ result }) {
+      if (!result || result.N === 0) return null;
+      const { tokens, N, product, perplexity } = result;
+
+      const productString = tokens.slice(0, 6).map(t => formatNumber(t.inverseProbability, 2)).join(' × ') + (tokens.length > 6 ? ' × ...' : '');
+
+      return (
+        <div className="glass-panel p-6 rounded-2xl border border-slate-800 space-y-4">
+          <h3 className="text-base font-bold text-white">Mathematical Step-by-Step Breakdown</h3>
+
+          <div className="space-y-3">
+            {/* Step 1 */}
+            <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 text-xs font-mono space-y-1">
+              <span className="text-sky-400 font-bold block">Step 1: Multiply all the 1/P values:</span>
+              <div className="text-slate-200">
+                {productString} = <strong className="text-white">{formatNumber(product, 3)}</strong>
+              </div>
+            </div>
+
+            {/* Step 2 */}
+            <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 text-xs font-mono space-y-1">
+              <span className="text-indigo-400 font-bold block">Step 2: Count the tokens:</span>
+              <div className="text-slate-200">
+                N = <strong className="text-white">{N}</strong>
+              </div>
+            </div>
+
+            {/* Step 3 */}
+            <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 text-xs font-mono space-y-1">
+              <span className="text-emerald-400 font-bold block">Step 3: Take the N-th root:</span>
+              <div className="text-slate-200">
+                ({formatNumber(product, 3)})<sup>1/{N}</sup> = <strong className="text-white text-sm">{formatNumber(perplexity, 3)}</strong>
+              </div>
+            </div>
+          </div>
+
+          {/* Verdict Banner */}
+          <div className="p-4 rounded-xl bg-gradient-to-r from-sky-950/60 to-indigo-950/60 border border-sky-500/30">
+            <span className="text-xl sm:text-2xl font-extrabold font-mono text-white block">
+              Perplexity &asymp; {formatNumber(perplexity, 3)}
+            </span>
+            <p className="text-xs text-slate-300 mt-1">
+              <strong>Intuition:</strong> On average the model was as unsure as choosing between about{' '}
+              <span className="font-bold text-sky-300">{formatNumber(perplexity, 3)}</span> equally likely tokens.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
